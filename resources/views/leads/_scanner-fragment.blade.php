@@ -58,6 +58,9 @@ document.addEventListener('DOMContentLoaded', function () {
     let scannerInstance = null;
     let selectedCameraId = null;
     let scannerPausedByModal = false;
+    let cameraInitInProgress = false;
+    let cameraInitAttempts = 0;
+    const MAX_CAMERA_INIT_RETRIES = 6;
 
     const html5QrcodeReady = new Promise((resolve) => {
         if (window.Html5Qrcode) {
@@ -526,13 +529,95 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     async function tryResumeScanner() {
-        if (!scannerInstance || isMetaModalOpen()) return;
+        if (isMetaModalOpen()) return;
+        if (!scannerInstance || !selectedCameraId) {
+            initializeScanner().catch(() => {});
+            return;
+        }
         try {
             await scannerInstance.resume();
             scannerPausedByModal = false;
         } catch (e) {
             // In PWA/home-screen mode camera may not resume; restart stream.
             await restartScanner().catch(() => {});
+        }
+    }
+
+    function scheduleScannerRetry() {
+        if (cameraInitAttempts >= MAX_CAMERA_INIT_RETRIES) return;
+        const delay = Math.min(4500, 700 * cameraInitAttempts);
+        setTimeout(() => {
+            initializeScanner().catch(() => {});
+        }, delay);
+    }
+
+    async function initializeScanner() {
+        if (cameraInitInProgress || isMetaModalOpen()) return;
+        cameraInitInProgress = true;
+
+        try {
+            if (!window.Html5Qrcode) {
+                throw new Error('Html5Qrcode not available yet');
+            }
+
+            const devices = await Html5Qrcode.getCameras();
+            if (!devices || devices.length === 0) {
+                throw new Error('No camera devices found');
+            }
+
+            let cameraId = devices[0].id;
+            const backCam = devices.find(d => /back|rear|environment/i.test(d.label));
+            if (backCam) cameraId = backCam.id;
+            selectedCameraId = cameraId;
+
+            if (!scannerInstance) {
+                scannerInstance = new Html5Qrcode(qrRegionId);
+            }
+
+            await scannerInstance.start(
+                cameraId,
+                {
+                    fps: 18,
+                    disableFlip: true,
+                    experimentalFeatures: {
+                        useBarCodeDetectorIfSupported: true,
+                    },
+                    qrbox: function (w, h) {
+                        const minEdge = Math.min(w, h);
+                        const size = Math.floor(minEdge * 0.86);
+                        return { width: size, height: size };
+                    },
+                },
+                (decodedText) => {
+                    handleDetectedCode(decodedText).then((processed) => {
+                        if (processed && scannerInstance) {
+                            scannerPausedByModal = true;
+                            scannerInstance.pause(true);
+                        }
+                    });
+                },
+                () => {
+                    // Ignore scan errors for performance.
+                }
+            );
+
+            cameraInitAttempts = 0;
+        } catch (err) {
+            cameraInitAttempts += 1;
+            console.error('Camera init/retry error', err);
+            if (!navigator.onLine) {
+                showLeadResult(
+                    'Offline Mode',
+                    'Camera is initializing. You can still scan via manual RegID input; camera will retry automatically.',
+                    null,
+                    'warning'
+                );
+            } else {
+                showLeadResult('Camera Preparing', 'Retrying camera access...', null, 'warning');
+            }
+            scheduleScannerRetry();
+        } finally {
+            cameraInitInProgress = false;
         }
     }
 
@@ -662,6 +747,7 @@ document.addEventListener('DOMContentLoaded', function () {
         setTimeout(() => {
             syncOfflineScans();
         }, 300);
+        initializeScanner().catch(() => {});
     });
     window.addEventListener('offline', function () {
         updateConnectionStatus();
@@ -710,60 +796,15 @@ document.addEventListener('DOMContentLoaded', function () {
     updateConnectionStatus();
 
     html5QrcodeReady.then(() => {
-        try {
-            const html5QrCode = new Html5Qrcode(qrRegionId);
-            scannerInstance = html5QrCode;
-            Html5Qrcode.getCameras().then((devices) => {
-                if (!devices || devices.length === 0) {
-                    showLeadResult('Camera Not Available', 'No camera devices found on this device.');
-                    return;
+        initializeScanner().catch(() => {});
+        window.addEventListener('beforeunload', function () {
+            try {
+                if (scannerInstance) {
+                    scannerInstance.stop().catch(() => {});
+                    scannerInstance.clear().catch(() => {});
                 }
-                let cameraId = devices[0].id;
-                const backCam = devices.find(d => /back|rear|environment/i.test(d.label));
-                if (backCam) cameraId = backCam.id;
-                selectedCameraId = cameraId;
-
-                html5QrCode.start(
-                    cameraId,
-                    {
-                        fps: 18,
-                        disableFlip: true,
-                        experimentalFeatures: {
-                            useBarCodeDetectorIfSupported: true,
-                        },
-                        qrbox: function (w, h) {
-                            const minEdge = Math.min(w, h);
-                            const size = Math.floor(minEdge * 0.86);
-                            return { width: size, height: size };
-                        },
-                    },
-                    (decodedText, decodedResult) => {
-                        handleDetectedCode(decodedText).then((processed) => {
-                            if (processed) {
-                                scannerPausedByModal = true;
-                                html5QrCode.pause(true);
-                            }
-                        });
-                    },
-                    (errorMessage) => {
-                        // Ignore scan errors for performance
-                    }
-                );
-
-                window.addEventListener('beforeunload', function () {
-                    try {
-                        html5QrCode.stop().catch(() => {});
-                        html5QrCode.clear().catch(() => {});
-                    } catch (e) {}
-                });
-            }).catch(err => {
-                console.error('Camera error', err);
-                showLeadResult('Camera Error', 'Unable to access camera. Check permissions.');
-            });
-        } catch (e) {
-            console.error('QR init error', e);
-            showLeadResult('Scanner Error', 'Unable to initialize QR scanner.');
-        }
+            } catch (e) {}
+        });
     });
 });
 </script>
