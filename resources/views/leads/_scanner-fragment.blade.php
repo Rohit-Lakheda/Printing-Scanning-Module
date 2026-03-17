@@ -56,6 +56,8 @@ document.addEventListener('DOMContentLoaded', function () {
     const DUPLICATE_WINDOW_MS = 1200;
     let pendingScan = null;
     let scannerInstance = null;
+    let selectedCameraId = null;
+    let scannerPausedByModal = false;
 
     const html5QrcodeReady = new Promise((resolve) => {
         if (window.Html5Qrcode) {
@@ -478,6 +480,62 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     }
 
+    function isMetaModalOpen() {
+        return !!(metaModal && metaModal.style.display === 'flex');
+    }
+
+    async function restartScanner() {
+        if (!selectedCameraId) return;
+        try {
+            if (scannerInstance) {
+                await scannerInstance.stop().catch(() => {});
+                await scannerInstance.clear().catch(() => {});
+            }
+        } catch (e) {
+            // ignore stop/clear errors
+        }
+
+        scannerInstance = new Html5Qrcode(qrRegionId);
+        await scannerInstance.start(
+            selectedCameraId,
+            {
+                fps: 18,
+                disableFlip: true,
+                experimentalFeatures: {
+                    useBarCodeDetectorIfSupported: true,
+                },
+                qrbox: function (w, h) {
+                    const minEdge = Math.min(w, h);
+                    const size = Math.floor(minEdge * 0.86);
+                    return { width: size, height: size };
+                },
+            },
+            (decodedText) => {
+                handleDetectedCode(decodedText).then((processed) => {
+                    if (processed && scannerInstance) {
+                        scannerPausedByModal = true;
+                        scannerInstance.pause(true);
+                    }
+                });
+            },
+            () => {
+                // ignore scan errors for performance
+            }
+        );
+        scannerPausedByModal = false;
+    }
+
+    async function tryResumeScanner() {
+        if (!scannerInstance || isMetaModalOpen()) return;
+        try {
+            await scannerInstance.resume();
+            scannerPausedByModal = false;
+        } catch (e) {
+            // In PWA/home-screen mode camera may not resume; restart stream.
+            await restartScanner().catch(() => {});
+        }
+    }
+
     async function submitPendingScan(withMeta) {
         if (!pendingScan) return;
         const leadTypeInput = document.querySelector('input[name="lead_type"]:checked');
@@ -495,11 +553,7 @@ document.addEventListener('DOMContentLoaded', function () {
         pendingScan = null;
         closeMetaModal();
         if (scannerInstance) {
-            try {
-                scannerInstance.resume();
-            } catch (e) {
-                // ignore resume errors
-            }
+            tryResumeScanner();
         }
     }
 
@@ -613,6 +667,18 @@ document.addEventListener('DOMContentLoaded', function () {
         updateConnectionStatus();
     });
 
+    window.addEventListener('pageshow', function () {
+        tryResumeScanner();
+    });
+    window.addEventListener('focus', function () {
+        tryResumeScanner();
+    });
+    document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') {
+            tryResumeScanner();
+        }
+    });
+
     // Manual input fallback (explicit submit)
     if (regidInput) {
         regidInput.addEventListener('keydown', function (e) {
@@ -655,6 +721,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 let cameraId = devices[0].id;
                 const backCam = devices.find(d => /back|rear|environment/i.test(d.label));
                 if (backCam) cameraId = backCam.id;
+                selectedCameraId = cameraId;
 
                 html5QrCode.start(
                     cameraId,
@@ -673,6 +740,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     (decodedText, decodedResult) => {
                         handleDetectedCode(decodedText).then((processed) => {
                             if (processed) {
+                                scannerPausedByModal = true;
                                 html5QrCode.pause(true);
                             }
                         });
