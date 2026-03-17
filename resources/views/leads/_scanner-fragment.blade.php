@@ -10,6 +10,9 @@
 </div>
 
 <div id="qr-reader" style="margin-top:10px;"></div>
+<div id="lead-camera-retry-wrap" style="display:none;margin-top:8px;text-align:center;">
+    <button id="lead-camera-retry-btn" type="button" class="btn btn-secondary">Retry Camera</button>
+</div>
 
 <div id="lead-result-card" style="margin-top:10px;">
     <div id="lead-result-title">Waiting for scan…</div>
@@ -40,6 +43,8 @@ document.addEventListener('DOMContentLoaded', function () {
     const resultTitleEl = document.getElementById('lead-result-title');
     const resultBodyEl = document.getElementById('lead-result-body');
     const regidInput = document.getElementById('lead-regid-input');
+    const cameraRetryWrap = document.getElementById('lead-camera-retry-wrap');
+    const cameraRetryBtn = document.getElementById('lead-camera-retry-btn');
     const metaModal = document.getElementById('lead-meta-modal');
     const metaSaveBtn = document.getElementById('lead-meta-save-btn');
     const metaSkipBtn = document.getElementById('lead-meta-skip-btn');
@@ -61,6 +66,11 @@ document.addEventListener('DOMContentLoaded', function () {
     let cameraInitInProgress = false;
     let cameraInitAttempts = 0;
     const MAX_CAMERA_INIT_RETRIES = 6;
+
+    function showCameraRetry(show) {
+        if (!cameraRetryWrap) return;
+        cameraRetryWrap.style.display = show ? '' : 'none';
+    }
 
     const html5QrcodeReady = new Promise((resolve) => {
         if (window.Html5Qrcode) {
@@ -554,6 +564,7 @@ document.addEventListener('DOMContentLoaded', function () {
     async function initializeScanner() {
         if (cameraInitInProgress || isMetaModalOpen()) return;
         cameraInitInProgress = true;
+        showCameraRetry(false);
 
         try {
             if (!window.Html5Qrcode) {
@@ -602,20 +613,31 @@ document.addEventListener('DOMContentLoaded', function () {
             );
 
             cameraInitAttempts = 0;
+            showCameraRetry(false);
         } catch (err) {
             cameraInitAttempts += 1;
             console.error('Camera init/retry error', err);
-            if (!navigator.onLine) {
+            if (cameraInitAttempts >= MAX_CAMERA_INIT_RETRIES) {
                 showLeadResult(
-                    'Offline Mode',
-                    'Camera is initializing. You can still scan via manual RegID input; camera will retry automatically.',
+                    'Camera Error',
+                    'Unable to access camera right now. Please tap Retry Camera.',
                     null,
-                    'warning'
+                    'error'
                 );
+                showCameraRetry(true);
             } else {
-                showLeadResult('Camera Preparing', 'Retrying camera access...', null, 'warning');
+                if (!navigator.onLine) {
+                    showLeadResult(
+                        'Offline Mode',
+                        'Camera is initializing. You can still scan via manual RegID input; camera will retry automatically.',
+                        null,
+                        'warning'
+                    );
+                } else {
+                    showLeadResult('Camera Preparing', 'Retrying camera access...', null, 'warning');
+                }
+                scheduleScannerRetry();
             }
-            scheduleScannerRetry();
         } finally {
             cameraInitInProgress = false;
         }
@@ -790,6 +812,14 @@ document.addEventListener('DOMContentLoaded', function () {
                 handleDetectedCode(value);
                 regidInput.value = '';
             }
+        });
+    }
+
+    if (cameraRetryBtn) {
+        cameraRetryBtn.addEventListener('click', function () {
+            cameraInitAttempts = 0;
+            showCameraRetry(false);
+            initializeScanner().catch(() => {});
         });
     }
 
